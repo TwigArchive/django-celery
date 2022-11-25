@@ -8,9 +8,8 @@ from django.contrib import admin
 from django.contrib.admin import helpers
 from django.contrib.admin.views import main as main_views
 from django.forms.widgets import Select
-from django.shortcuts import render_to_response
-from django.template import RequestContext
-from django.utils.html import escape
+from django.shortcuts import render
+from django.utils.html import escape, format_html, mark_safe
 from django.utils.translation import ugettext_lazy as _
 
 from celery import current_app
@@ -23,6 +22,7 @@ from .admin_utils import action, display_field, fixedwidth
 from .models import (
     TaskState, WorkerState,
     PeriodicTask, IntervalSchedule, CrontabSchedule,
+    PeriodicTasks
 )
 from .humanize import naturaldate
 from .utils import is_database_scheduler, make_aware
@@ -54,20 +54,24 @@ class MonitorList(main_views.ChangeList):
 def colored_state(task):
     state = escape(task.state)
     color = TASK_STATE_COLORS.get(task.state, 'black')
-    return '<b><span style="color: {0};">{1}</span></b>'.format(color, state)
+    return format_html(
+        '<b><span style="color: {0};">{1}</span></b>', color, state
+    )
 
 
 @display_field(_('state'), 'last_heartbeat')
 def node_state(node):
     state = node.is_alive() and 'ONLINE' or 'OFFLINE'
     color = NODE_STATE_COLORS[state]
-    return '<b><span style="color: {0};">{1}</span></b>'.format(color, state)
+    return format_html(
+        '<b><span style="color: {0};">{1}</span></b>', color, state
+    )
 
 
 @display_field(_('ETA'), 'eta')
 def eta(task):
     if not task.eta:
-        return '<span style="color: gray;">none</span>'
+        return mark_safe('<span style="color: gray;">none</span>')
     return escape(make_aware(task.eta))
 
 
@@ -75,16 +79,16 @@ def eta(task):
 def tstamp(task):
     # convert to local timezone
     value = make_aware(task.tstamp)
-    return '<div title="{0}">{1}</div>'.format(
-        escape(str(value)), escape(naturaldate(value)),
+    return format_html(
+        '<div title="{0}">{1}</div>', str(value), naturaldate(value)
     )
 
 
 @display_field(_('name'), 'name')
 def name(task):
     short_name = abbrtask(task.name, 16)
-    return '<div title="{0}"><b>{1}</b></div>'.format(
-        escape(task.name), escape(short_name),
+    return format_html(
+        '<div title="{0}"><b>{1}</b></div>', task.name, short_name
     )
 
 
@@ -194,10 +198,7 @@ class TaskMonitor(ModelMonitor):
             'app_label': app_label,
         }
 
-        return render_to_response(
-            self.rate_limit_confirmation_template, context,
-            context_instance=RequestContext(request),
-        )
+        return render(request, self.rate_limit_confirmation_template, context)
 
     def get_actions(self, request):
         actions = super(TaskMonitor, self).get_actions(request)
@@ -237,6 +238,7 @@ class WorkerMonitor(ModelMonitor):
         actions = super(WorkerMonitor, self).get_actions(request)
         actions.pop('delete_selected', None)
         return actions
+
 
 admin.site.register(TaskState, TaskMonitor)
 admin.site.register(WorkerState, WorkerMonitor)
@@ -328,6 +330,7 @@ class PeriodicTaskAdmin(admin.ModelAdmin):
         'kwargs',
     )
     search_fields = ('name', 'task')
+    list_display_links = ('enabled', '__unicode__', 'task')
     ordering = ('-enabled', 'name')
     fieldsets = (
         (None, {
@@ -350,13 +353,20 @@ class PeriodicTaskAdmin(admin.ModelAdmin):
     actions = ['enable_tasks',
                'disable_tasks']
 
+    def update_periodic_tasks(self):
+        dummy_periodic_task = PeriodicTask()
+        dummy_periodic_task.no_changes = False
+        PeriodicTasks.changed(dummy_periodic_task)
+
     @action(_('Enable selected periodic tasks'))
     def enable_tasks(self, request, queryset):
         queryset.update(enabled=True)
+        self.update_periodic_tasks()
 
     @action(_('Disable selected periodic tasks'))
     def disable_tasks(self, request, queryset):
         queryset.update(enabled=False)
+        self.update_periodic_tasks()
 
     def changelist_view(self, request, extra_context=None):
         extra_context = extra_context or {}

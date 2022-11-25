@@ -10,7 +10,11 @@ from celery import schedules
 from celery.beat import Scheduler, ScheduleEntry
 from celery.utils.encoding import safe_str, safe_repr
 from celery.utils.log import get_logger
-from celery.utils.timeutils import is_naive
+
+try:
+    from celery.utils.timeutils import is_naive
+except ImportError:
+    from celery.utils.time import is_naive
 
 from django.db import transaction
 from django.core.exceptions import ObjectDoesNotExist
@@ -120,6 +124,11 @@ class ModelEntry(ScheduleEntry):
             fields.pop(skip_field, None)
         schedule = fields.pop('schedule')
         model_schedule, model_field = cls.to_model_schedule(schedule)
+
+        # reset schedule
+        for t in cls.model_schedules:
+            fields[t[2]] = None
+
         fields[model_field] = model_schedule
         fields['args'] = dumps(fields.get('args') or [])
         fields['kwargs'] = dumps(fields.get('kwargs') or {})
@@ -146,14 +155,17 @@ class DatabaseScheduler(Scheduler):
     _last_timestamp = None
     _initial_read = False
 
+    max_interval = DEFAULT_MAX_INTERVAL
+
     def __init__(self, *args, **kwargs):
         self._dirty = set()
         self._finalize = Finalize(self, self.sync, exitpriority=5)
         Scheduler.__init__(self, *args, **kwargs)
         self.max_interval = (
-            kwargs.get('max_interval') or
-            self.app.conf.CELERYBEAT_MAX_LOOP_INTERVAL or
-            DEFAULT_MAX_INTERVAL)
+            kwargs.get('max_interval')
+            or self.app.conf.CELERYBEAT_MAX_LOOP_INTERVAL
+            or self.max_interval
+        )
 
     def setup_schedule(self):
         self.install_default_entries(self.schedule)
@@ -182,6 +194,8 @@ class DatabaseScheduler(Scheduler):
 
             last, ts = self._last_timestamp, self.Changes.last_change()
         except DATABASE_ERRORS as exc:
+            # Close the connection when it is broken
+            transaction.get_connection().close_if_unusable_or_obsolete()
             error('Database gave error: %r', exc, exc_info=1)
             return False
         try:
